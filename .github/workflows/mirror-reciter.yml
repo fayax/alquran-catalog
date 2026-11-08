@@ -26,10 +26,11 @@ jobs:
   mirror:
     name: Surahs ${{ matrix.range[0] }}-${{ matrix.range[1] }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: 3
+      # One at a time: all jobs share the token's hourly request limit.
+      max-parallel: 1
       matrix:
         range: [[1, 2], [3, 6], [7, 12], [13, 25], [26, 50], [51, 114]]
     steps:
@@ -37,6 +38,7 @@ jobs:
       - name: Mirror
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: >
           tools/mirror_reciter.sh "${{ inputs.reciter }}" "${{ inputs.source }}"
           ${{ matrix.range[0] }} ${{ matrix.range[1] }}
@@ -53,7 +55,8 @@ jobs:
           missing=0
           for s in $(seq 1 114); do
             S=$(printf '%03d' "$s")
-            gh release view "${{ inputs.reciter }}-$S" --json assets --jq '.assets[].name' \
-              | grep -qx "manifest-$S.json" || { echo "missing $S"; missing=1; }
+            curl -fsL -r 0-0 -o /dev/null --retry 3 \
+              "https://github.com/$GH_REPO/releases/download/${{ inputs.reciter }}-$S/manifest-$S.json" \
+              || { echo "missing $S"; missing=1; }
           done
           exit $missing
