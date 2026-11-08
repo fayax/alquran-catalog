@@ -1,0 +1,54 @@
+name: Publish the catalog to R2
+
+# The app reads the signed catalog and the translation packs from R2:
+#   https://cdn-alquran.fayax.net/catalog/catalog.json (+ .sig, *.db)
+# This repository stays the source of truth: push packs and the signed
+# catalog here, and this workflow copies them to the bucket. Packs go up
+# first, so the catalog never points at a pack that isn't there yet.
+on:
+  push:
+    branches: [main]
+    paths: ["catalog.json", "catalog.json.sig", "*.db"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-catalog
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      PUBLIC_URL: https://cdn-alquran.fayax.net
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload
+        run: |
+          s3() { aws --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" "$@"; }
+          shopt -s nullglob
+          for f in *.db; do
+            # A pack's name includes its version, so it never changes.
+            s3 s3 cp "$f" "s3://$R2_BUCKET/catalog/$f" --content-type application/vnd.sqlite3 \
+              --cache-control 'public, max-age=31536000, immutable' --only-show-errors
+          done
+          for f in catalog.json catalog.json.sig; do
+            type=application/json; [ "$f" = catalog.json.sig ] && type=application/octet-stream
+            s3 s3 cp "$f" "s3://$R2_BUCKET/catalog/$f" --content-type "$type" \
+              --cache-control 'public, max-age=300' --only-show-errors
+          done
+      - name: Public URL serves the catalog
+        run: |
+          curl -fsS "$PUBLIC_URL/catalog/catalog.json" -o served.json
+          curl -fsS "$PUBLIC_URL/catalog/catalog.json.sig" -o served.sig
+          cmp served.json catalog.json && cmp served.sig catalog.json.sig
+          echo "Catalog served from $PUBLIC_URL/catalog/"
