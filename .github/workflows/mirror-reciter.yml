@@ -1,0 +1,59 @@
+name: Mirror a reciter
+
+# Copies a reciter's ayah-by-ayah recitation into releases of this
+# repository (one release per surah), because QUL asks apps not to
+# stream from its CDN. Safe to re-run: complete surahs are skipped.
+on:
+  workflow_dispatch:
+    inputs:
+      reciter:
+        description: Reciter id used in tags and the app
+        default: afasy
+        required: true
+      source:
+        description: Source URL template ({surah3}{ayah3})
+        default: https://audio-cdn.tarteel.ai/quran/alafasy/{surah3}{ayah3}.mp3
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-${{ inputs.reciter }}
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Surahs ${{ matrix.range[0] }}-${{ matrix.range[1] }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        range: [[1, 2], [3, 6], [7, 12], [13, 25], [26, 50], [51, 114]]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          tools/mirror_reciter.sh "${{ inputs.reciter }}" "${{ inputs.source }}"
+          ${{ matrix.range[0] }} ${{ matrix.range[1] }}
+
+  check:
+    name: Check all 114 surahs
+    needs: mirror
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          missing=0
+          for s in $(seq 1 114); do
+            S=$(printf '%03d' "$s")
+            gh release view "${{ inputs.reciter }}-$S" --json assets --jq '.assets[].name' \
+              | grep -qx "manifest-$S.json" || { echo "missing $S"; missing=1; }
+          done
+          exit $missing
