@@ -55,8 +55,9 @@ jobs:
           missing=0
           for s in $(seq 1 114); do
             S=$(printf '%03d' "$s")
-            curl -fsL -r 0-0 -o /dev/null --retry 3 \
-              "https://github.com/$GH_REPO/releases/download/${{ inputs.reciter }}-$S/manifest-$S.json" \
-              || { echo "missing $S"; missing=1; }
+            tag="${{ inputs.reciter }}-$S"
+            id=$(gh api "repos/$GH_REPO/releases/tags/$tag" --jq .id 2>/dev/null) &&
+              gh api --paginate "repos/$GH_REPO/releases/$id/assets?per_page=100" --jq '.[].name' \
+                | grep -qx "manifest-$S.json" || { echo "missing $S"; missing=1; }
           done
           exit $missing

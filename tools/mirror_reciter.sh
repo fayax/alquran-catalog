@@ -21,39 +21,37 @@ counts=(0 7 286 200 176 120 165 206 75 129 109 123 111 43 52 99 128 111 110 98 1
 work="$(mktemp -d)"
 repo="${GH_REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner)}"
 
-# True if the release asset can be downloaded. Costs no API requests.
-mirrored() {
-  curl -fsL -r 0-0 -o /dev/null --retry 3 "https://github.com/$repo/releases/download/$1/$2"
+# Names and sizes of a release's assets, one "name size" per line.
+# Prints nothing if the release does not exist yet.
+assets() {
+  local id
+  if ! id=$(gh api "repos/$repo/releases/tags/$1" --jq .id 2>&1); then
+    grep -q "HTTP 404" <<<"$id" && return 0
+    echo "$id" >&2; return 1
+  fi
+  gh api --paginate "repos/$repo/releases/$id/assets?per_page=100" \
+    --jq '.[] | "\(.name) \(.size)"'
 }
 
 # The workflow token allows about 1,000 API requests an hour, and every
-# uploaded file is one. When a request is refused, wait for the limit to
-# reset instead of failing.
-wait_for_limit() {
-  local remaining reset now
-  read -r remaining reset < <(gh api rate_limit --jq '.resources.core | "\(.remaining) \(.reset)"')
-  now=$(date +%s)
-  if [ "$remaining" -lt 5 ] && [ "$reset" -gt "$now" ]; then
-    echo "Rate limit reached, waiting $(( reset - now + 10 ))s"
-    sleep $(( reset - now + 10 ))
-  else
-    sleep 60
-  fi
+# uploaded file costs one. When GitHub refuses a request, wait and try
+# again rather than fail: the limit resets within the hour.
+retry() {
+  local try
+  for try in $(seq 1 20); do
+    "$@" && return 0
+    echo "Waiting 5 minutes before trying again ($try)"
+    sleep 300
+  done
+  echo "::error::gave up: $*"; return 1
 }
 
-upload() {
-  local tag="$1" file="$2" try
-  for try in $(seq 1 30); do
-    gh release upload "$tag" "$file" --clobber && return 0
-    wait_for_limit
-  done
-  echo "::error::could not upload $file"; return 1
-}
 for ((s = first; s <= last; s++)); do
   S=$(printf '%03d' "$s")
   tag="${reciter}-${S}"
   n=${counts[$s]}
-  if mirrored "$tag" "manifest-${S}.json"; then
+  have=$(retry assets "$tag")
+  if grep -q "^manifest-${S}.json " <<<"$have"; then
     echo "$tag: already mirrored"
     continue
   fi
@@ -82,19 +80,22 @@ for ((s = first; s <= last; s++)); do
   } > "$dir/manifest-${S}.json"
   [ "$(ls "$dir"/*.mp3 | wc -l)" -eq "$n" ] || { echo "::error::$tag count"; exit 1; }
 
-  until gh release view "$tag" >/dev/null 2>&1 ||
-      gh release create "$tag" --title "$reciter surah $s" \
-        --notes "Ayah-by-ayah recitation, surah $s ($n ayahs). Mirrored from QUL (Quranic Universal Library) by Tarteel." \
-        --latest=false; do
-    wait_for_limit
-  done
-  # Skip files an earlier, interrupted run already uploaded.
-  id=$(gh api "repos/$repo/releases/tags/$tag" --jq .id)
-  have=$(gh api --paginate "repos/$repo/releases/$id/assets?per_page=100" --jq '.[] | "\(.name) \(.size)"')
+  [ -n "$have" ] ||
+    retry gh release create "$tag" --title "$reciter surah $s" \
+      --notes "Ayah-by-ayah recitation, surah $s ($n ayahs). Mirrored from QUL (Quranic Universal Library) by Tarteel." \
+      --latest=false
+  # Skip files an earlier, interrupted run already uploaded. --clobber
+  # costs extra requests, so it is only used for a file that is wrong.
   for f in "$dir"/*.mp3; do
-    grep -qx "$(basename "$f") $(stat -c %s "$f")" <<<"$have" || upload "$tag" "$f"
+    name=$(basename "$f")
+    if grep -qx "$name $(stat -c %s "$f")" <<<"$have"; then continue; fi
+    if grep -q "^$name " <<<"$have"; then
+      retry gh release upload "$tag" "$f" --clobber
+    else
+      retry gh release upload "$tag" "$f"
+    fi
   done
   # The manifest goes last, so its presence marks a complete release.
-  upload "$tag" "$dir/manifest-${S}.json"
+  retry gh release upload "$tag" "$dir/manifest-${S}.json"
   rm -rf "$dir"
 done
