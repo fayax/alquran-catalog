@@ -15,6 +15,10 @@ on:
         description: Source URL template ({surah3}{ayah3})
         default: https://audio-cdn.tarteel.ai/quran/alafasy/{surah3}{ayah3}.mp3
         required: true
+      public_url:
+        description: Public address of the bucket
+        default: https://cdn-alquran.fayax.net
+        required: true
 
 permissions:
   contents: read
@@ -65,3 +69,9 @@ jobs:
               || { echo "missing $S"; missing=1; }
           done
           exit $missing
+      - name: Public URL serves the files
+        run: |
+          base="${{ inputs.public_url }}/audio/${{ inputs.reciter }}"
+          curl -fsS -o /dev/null -D - "$base/001001.mp3" | tee headers.txt
+          grep -qi '^content-type: audio/mpeg' headers.txt
+          curl -fsS "$base/manifest-001.json" | head -c 200; echo
